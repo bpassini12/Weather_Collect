@@ -12,7 +12,8 @@ import datetime
 from datetime import timedelta
 import os
 import sqlite3
-
+# async downloads
+from multiprocessing.dummy import Pool as ThreadPool
 # %%
 tday = datetime.datetime.today().replace(hour=0,minute=0,second=0,microsecond=0)
 tday_str = tday.strftime('%Y-%m-%d')
@@ -116,18 +117,20 @@ station_df = station_df.merge(max_dt, how='left')
 station_df.MAX_DATE.fillna('01-01-2000',inplace=True)
 station_df['MAX_DATE'] = pd.to_datetime(station_df['MAX_DATE'])
 station_df['MAX_DATE_STR'] = station_df['MAX_DATE'].dt.strftime('%Y-%m-%d')
+station_df['END_DATE_STR'] = tday_str
 
 # %%
 # %%
 hou_stations_df = station_df[(station_df.NAME.str.contains('HOUSTON','SUGAR LAND')) |(station_df.STATION=='72063700223')].reset_index(drop=True)
-hou_stations_df
 
 # %%
-pull_tups = [tuple(r) for r in hou_stations_df[['STATION','MAX_DATE_STR']].to_numpy()]
+pull_tups = [tuple(r) for r in hou_stations_df[['STATION','MAX_DATE_STR','END_DATE_STR']].to_numpy()]
 
 # %%
-def hrly_station_wx(station, strt_dte, end_dte):
+def hrly_station_wx(tup, keep_csv=False):
    '''Pulls hourly weather from NOAA Api'''
+   
+   station, strt_dte, end_dte = tup
 
    try:
       os.makedirs(download_fldr)
@@ -193,22 +196,14 @@ def hrly_station_wx(station, strt_dte, end_dte):
    df.sort_values(by=['date','source'], ascending=True, inplace=True)
    df.drop_duplicates(keep='last', subset=['station','date'],inplace=True)
 
+   if not keep_csv:
+       os.remove(filepath)
+
    return df
 # %%
-comb_df = pd.concat([hrly_station_wx(station=tup[0], strt_dte=tup[1], end_dte=tday_str) for tup in pull_tups[0:1]])
+cnt = len(pull_tups) if len(pull_tups)<20 else 20
+pool = ThreadPool(cnt)
+results = pool.map(hrly_station_wx, pull_tups)
+comb_df = pd.concat(results)
 # %%
-
-# %%
-hrly_station_wx('72242953910','2023-10-01', '2023-10-10')
-# %%
-for tup in pull_tups[0:1]:
-    print(tup)
-    print(tup[0],tup[1])
-# %%
-
-comb_df = pd.DataFrame()
-for tup in pull_tups:
-    print(tup)
-    dwnld_df = hrly_station_wx(station=tup[0], strt_dte=tup[1], end_dte=tday_str)
-    comb_df = pd.concat([comb_df,dwnld_df])
 #%%
