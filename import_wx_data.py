@@ -37,6 +37,36 @@ sql_create_awsmcs_wban = ''' Create Table if not exists stations (
 
 bp.create_table(db_name, sql_create_awsmcs_wban)
 
+sql_create_hrly_wx = ''' Create Table if not exists hrly_wx (
+                                    STATION text,
+                                    STATION_NAME text,
+                                    DATE text,
+                                    REPORT_TYPE text,
+                                    SOURCE integer,
+                                    HOURLYALTIMETERSETTING real,
+                                    HOURLYDEWPOINTTEMPERATURE integer,
+                                    HOURLYDRYBULBTEMPERATURE integer,
+                                    HOURLYPRECIPITATION real,
+                                    HOURLYPRESSURECHANGE real,
+                                    HOURLYPRESSURETENDENCY integer,
+                                    HOURLYRELATIVEHUMIDITY integer,
+                                    HOURLYSEALEVELPRESSURE real,
+                                    HOURLYSTATIONPRESSURE real,
+                                    HOURLYVISIBILITY real,
+                                    HOURLYWETBULBTEMPERATURE integer,
+                                    HOURLYWINDDIRECTION integer,
+                                    HOURLYWINDGUSTSPEED integer,
+                                    HOURLYWINDSPEED integer
+                                    );
+                                '''
+
+bp.create_table(db_name, sql_create_hrly_wx)
+
+# creates 
+bp.create_table(db_name, 'CREATE UNIQUE INDEX if not exists ux_hrly_wban_wthr ON hrly_wx(STATION, STATION_NAME, DATE)')
+
+# creates 
+bp.create_table(db_name, 'CREATE INDEX if not exists idx_hrly_wban_wthr ON hrly_wx(STATION, STATION_NAME, DATE)')
 
 # pull from database table or else repull from website and load into db
 try:
@@ -159,7 +189,7 @@ def hrly_station_wx(station, strt_dte, end_dte):
 
    # sort and keep the last
    df = df[df.report_type.isin(['FM-12','FM-15','FM-16'])].reset_index(drop=True)
-   df['source'] = df.source.astype(int)
+   df['source'] = df.source.astype(str)
    df.sort_values(by=['date','source'], ascending=True, inplace=True)
    df.drop_duplicates(keep='last', subset=['station','date'],inplace=True)
 
@@ -175,3 +205,10 @@ for tup in pull_tups[0:1]:
     print(tup)
     print(tup[0],tup[1])
 # %%
+
+comb_df = pd.DataFrame()
+for tup in pull_tups:
+    print(tup)
+    dwnld_df = hrly_station_wx(station=tup[0], strt_dte=tup[1], end_dte=tday_str)
+    comb_df = pd.concat([comb_df,dwnld_df])
+#%%
