@@ -11,11 +11,14 @@ import numpy as np
 import datetime
 from datetime import timedelta
 import os
+import pickle
+from cryptography.fernet import Fernet
+import yagmail
 import sqlite3
 # async downloads
 from multiprocessing.dummy import Pool as ThreadPool
 # %%
-tday = datetime.datetime.today().replace(hour=0,minute=0,second=0,microsecond=0)
+tday = pd.to_datetime(datetime.datetime.today().date())
 tday_str = tday.strftime('%Y-%m-%d')
 
 
@@ -25,7 +28,6 @@ conn = bp.create_connection(db_name)
 cwd = os.getcwd()
 
 download_fldr = os.path.join(cwd, 'downloads')
-
 
 sql_create_awsmcs_wban = ''' Create Table if not exists stations (
                                     AWSMSC text,
@@ -109,9 +111,12 @@ except sqlite3.OperationalError:
     station_df.to_sql(name='stations', con=conn, if_exists='append', index=False)
 
 # %%
+# get max date per station in db and add 1 day for new startdate
 max_dt = pd.read_sql_query(con=conn, sql='''Select max(date) MAX_DATE, station 
                                             from hrly_wx
                                             group by station ''')
+max_dt['MAX_DATE'] = pd.to_datetime(max_dt['MAX_DATE'])
+max_dt['MAX_DATE'] = max_dt.MAX_DATE.dt.date + datetime.timedelta(days=1)
 # %% 
 station_df = station_df.merge(max_dt, how='left')
 station_df.MAX_DATE.fillna('01-01-2000',inplace=True)
@@ -124,7 +129,9 @@ station_df['END_DATE_STR'] = tday_str
 hou_stations_df = station_df[(station_df.NAME.str.contains('HOUSTON','SUGAR LAND')) |(station_df.STATION=='72063700223')].reset_index(drop=True)
 
 # %%
-pull_tups = [tuple(r) for r in hou_stations_df[['STATION','MAX_DATE_STR','END_DATE_STR']].to_numpy()]
+pull_tups = [tuple(r) for r in station_df[['STATION','MAX_DATE_STR','END_DATE_STR']].to_numpy()]
+pull_hou_tups = [tuple(r) for r in hou_stations_df[['STATION','MAX_DATE_STR','END_DATE_STR']].to_numpy()]
+
 
 # %%
 def hrly_station_wx(tup, keep_csv=False):
@@ -133,7 +140,7 @@ def hrly_station_wx(tup, keep_csv=False):
    station, strt_dte, end_dte = tup
 
    try:
-      os.makedirs(download_fldr)
+      os.makedirs(download_fldr)      
    except FileExistsError:
       # directory already exists
       pass
@@ -201,9 +208,54 @@ def hrly_station_wx(tup, keep_csv=False):
 
    return df
 # %%
-cnt = len(pull_tups) if len(pull_tups)<20 else 20
-pool = ThreadPool(cnt)
-results = pool.map(hrly_station_wx, pull_tups)
-comb_df = pd.concat(results)
+
+pool = ThreadPool(5)
+results = pool.map(hrly_station_wx, pull_hou_tups)
+results_df = pd.concat(results)
+
+# Truncate the last day of data per station so that you dont have partial day
+mx_dt_df = results_df.groupby('station').agg({'date':max}).reset_index()
+mx_dt_df['max_date'] = mx_dt_df.date.dt.date
+mx_dt_df.drop(columns='date', inplace=True)
+
+# drop the rows that are less than the max truncated date
+final_df = results_df.merge(mx_dt_df)
+final_df = final_df[final_df.date<final_df.max_date].reset_index(drop=True)
+final_df.drop(columns='max_date', inplace=True)
 # %%
-#%%
+# upload data and vacuum db
+final_df.to_sql(name='hrly_wx', con=conn, if_exists='append', index=False)
+bp.vacuum_db(db_name=db_name)
+# %%
+summary_df = final_df.groupby(['station','station_name']).agg({'date':['min','max']}).reset_index()
+
+def get_credentials():
+    '''retrieve encrypted credentials and unencrypt'''
+
+    key_path = os.path.join(os.path.expanduser('~'), '.fernet')
+    key = pickle.load(open(key_path, 'rb'))
+    cipher_suite = Fernet(key)
+    encrypted_credentials_df = pd.read_csv('encrypted_credentials.csv')
+    
+    #gmail
+    gmail = 'Gmail'
+    gmail_ec_row = encrypted_credentials_df.loc[encrypted_credentials_df.login_account == gmail]
+    gmail_user = gmail_ec_row.iloc[0]['username']
+    gmail_pwd_encrypt = gmail_ec_row.iloc[0]['encrypted_password']
+    gmail_pwd = cipher_suite.decrypt(str.encode(gmail_pwd_encrypt)).decode('utf-8')
+    
+    return gmail_user, gmail_pwd
+
+def send_email(email_subject, email_contents):
+    gmail_user, gmail_pwd = get_credentials()
+    
+    yag = yagmail.SMTP(user=gmail_user, password=gmail_pwd)
+    
+    yag.send(to=gmail_user, subject=email_subject, contents=email_contents)
+
+
+send_email(email_subject=f'WEATHER COLLECT: {tday_str} '
+        , email_contents=['Weather Import Summary:''\n\n'
+                          , summary_df])
+
+# %%
